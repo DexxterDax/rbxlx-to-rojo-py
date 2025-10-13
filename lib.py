@@ -64,9 +64,12 @@ class TreeIterator:
                         if has_scripts.get(child_id, False):
                             child_instance = self.tree.get_by_ref(child_id)
                             if child_instance:
-                                children_partitions[child_instance.name] = create_partition(
-                                    child_instance,
-                                    folder_path / child_instance.name
+                                child_path = folder_path / child_instance.name
+                                children_partitions[child_instance.name] = TreePartition(
+                                    class_name="Folder",
+                                    children={},
+                                    ignore_unknown_instances=True,
+                                    path=child_path
                                 )
                     
                     instructions.append(AddToTreeInstruction(
@@ -120,7 +123,28 @@ def repr_instance(
     
     class_name = child.class_name
     
+    # Handle Folder
     if class_name == "Folder":
+        folder_path = base / child.name
+        meta_contents = json.dumps(
+            MetaFile(ignore_unknown_instances=True).to_dict(),
+            indent=2
+        ).encode('utf-8')
+        
+        return (
+            [
+                CreateFolderInstruction(folder=folder_path),
+                CreateFileInstruction(
+                    filename=folder_path / "init.meta.json",
+                    contents=meta_contents
+                )
+            ],
+            folder_path
+        )
+    
+    # Special handling for StarterCharacterScripts and StarterPlayerScripts
+    # These should be treated as Folders to avoid Rojo className conflicts
+    if class_name in ("StarterCharacterScripts", "StarterPlayerScripts"):
         folder_path = base / child.name
         meta_contents = json.dumps(
             MetaFile(ignore_unknown_instances=True).to_dict(),
