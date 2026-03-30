@@ -1,9 +1,19 @@
 """Roblox file format parsers for XML and binary files."""
 
-import xml.etree.ElementTree as ET
-from typing import Dict, List, Optional, Any
-from pathlib import Path
+import json
 import logging
+import shutil
+import struct
+import subprocess
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+from uuid import uuid4
+
+try:
+    import compression.zstd as zstd
+except ImportError:  # pragma: no cover
+    zstd = None
 
 logger = logging.getLogger(__name__)
 
@@ -145,13 +155,207 @@ def from_str_default(xml_string: str) -> WeakDom:
     return from_reader_default(io.StringIO(xml_string))
 
 
-# Placeholder for binary format support
+def _binary_bridge_script() -> Path:
+    """Return the path to the rbxmk-based binary parser bridge."""
+    return Path(__file__).resolve().parent / "scripts" / "parse_binary_place.lua"
+
+
+def _decompress_zstd(payload: bytes) -> bytes:
+    """Decompress a Zstandard frame."""
+    if zstd is not None:
+        return zstd.decompress(payload)
+
+    zstd_binary = shutil.which("zstd")
+    if zstd_binary is None:
+        raise RuntimeError(
+            "This .rbxl file uses Zstandard-compressed chunks. "
+            "Use Python 3.14+ or install the `zstd` CLI."
+        )
+
+    completed = subprocess.run(
+        [zstd_binary, "-d", "-q", "-c"],
+        input=payload,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise ValueError(completed.stderr.decode("utf-8", errors="replace").strip() or "zstd decompression failed")
+
+    return completed.stdout
+
+
+def _normalize_binary_for_rbxmk(file_path: Path) -> Path:
+    """
+    Rewrite Zstandard-compressed chunks into uncompressed chunks so older
+    parsers like rbxmk can decode newer Roblox binary files.
+    """
+    temp_dir = Path(Path.home().anchor or "/") / "tmp"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_path = temp_dir / f"rbxlx-to-rojo-normalized-{uuid4().hex}{file_path.suffix.lower() or '.rbxl'}"
+
+    changed = False
+
+    with file_path.open("rb") as source, temp_path.open("wb") as target:
+        header = source.read(32)
+        if len(header) < 32:
+            temp_path.unlink(missing_ok=True)
+            raise ValueError("Binary file is too short to be a valid Roblox binary file.")
+
+        target.write(header)
+
+        while True:
+            chunk_header = source.read(16)
+            if not chunk_header:
+                break
+            if len(chunk_header) < 16:
+                temp_path.unlink(missing_ok=True)
+                raise ValueError("Binary file ended in the middle of a chunk header.")
+
+            chunk_name = chunk_header[:4]
+            compressed_len, uncompressed_len, reserved = struct.unpack("<III", chunk_header[4:16])
+            payload_len = compressed_len if compressed_len else uncompressed_len
+            payload = source.read(payload_len)
+
+            if len(payload) < payload_len:
+                temp_path.unlink(missing_ok=True)
+                raise ValueError("Binary file ended in the middle of a chunk payload.")
+
+            if compressed_len and payload.startswith(b"\x28\xb5\x2f\xfd"):
+                decompressed = _decompress_zstd(payload)
+                if len(decompressed) != uncompressed_len:
+                    temp_path.unlink(missing_ok=True)
+                    raise ValueError(
+                        f"Zstandard chunk {chunk_name!r} decompressed to {len(decompressed)} bytes, "
+                        f"expected {uncompressed_len}."
+                    )
+
+                target.write(chunk_name)
+                target.write(struct.pack("<III", 0, len(decompressed), reserved))
+                target.write(decompressed)
+                changed = True
+            else:
+                target.write(chunk_header)
+                target.write(payload)
+
+            if chunk_name == b"END\x00":
+                trailing = source.read()
+                if trailing:
+                    target.write(trailing)
+                break
+
+    if not changed:
+        temp_path.unlink(missing_ok=True)
+        return file_path
+
+    return temp_path
+
+
+def _from_binary_json(payload: Dict[str, Any]) -> WeakDom:
+    """Convert a serialized binary parse result into a WeakDom."""
+    root_instance = Instance(class_name="DataModel", name="DataModel")
+    dom = WeakDom(root_instance)
+    instances_by_id: Dict[int, Instance] = {}
+
+    for raw_instance in payload.get("instances", []):
+        instance = Instance(
+            class_name=raw_instance.get("class_name", "Unknown"),
+            referent=str(raw_instance["id"]),
+        )
+
+        for prop_name, prop_value in raw_instance.get("properties", {}).items():
+            instance.properties[prop_name] = prop_value
+            if prop_name == "Name" and isinstance(prop_value, str):
+                instance.name = prop_value
+
+        if not instance.name:
+            instance.name = raw_instance.get("class_name", "Unknown")
+
+        instances_by_id[raw_instance["id"]] = instance
+
+    for raw_instance in payload.get("instances", []):
+        instance = instances_by_id[raw_instance["id"]]
+        parent_id = raw_instance.get("parent_id")
+
+        if parent_id is None:
+            dom.insert(root_instance.referent, instance)
+            continue
+
+        parent = instances_by_id.get(parent_id)
+        if parent is None:
+            logger.warning("Binary parser returned an unknown parent id: %s", parent_id)
+            dom.insert(root_instance.referent, instance)
+            continue
+
+        dom.insert(parent.referent, instance)
+
+    return dom
+
+
+def from_path_default_binary(file_path: Path) -> WeakDom:
+    """
+    Parse a Roblox binary file (rbxl/rbxm) from a path.
+    Requires `rbxmk` to be installed through Aftman.
+    """
+    rbxmk = shutil.which("rbxmk")
+    if rbxmk is None:
+        aftman_path = Path.home() / ".aftman" / "bin" / "rbxmk"
+        if aftman_path.exists():
+            rbxmk = str(aftman_path)
+
+    if rbxmk is None:
+        raise RuntimeError(
+            "Binary Roblox file parsing requires `rbxmk`.\n"
+            "Install it with `aftman trust Anaminus/rbxmk && aftman add --global Anaminus/rbxmk`."
+        )
+
+    script_path = _binary_bridge_script()
+    if not script_path.exists():
+        raise RuntimeError(f"Missing binary parser bridge: {script_path}")
+
+    normalized_path = _normalize_binary_for_rbxmk(file_path)
+
+    try:
+        completed = subprocess.run(
+            [rbxmk, "run", "--allow-insecure-paths", str(script_path), str(normalized_path)],
+            cwd=script_path.parent.parent,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        if completed.returncode != 0:
+            error_message = completed.stderr.strip() or completed.stdout.strip()
+            raise ValueError(error_message or "Binary parser bridge failed.")
+
+        stdout = completed.stdout.strip()
+        if not stdout:
+            error_message = completed.stderr.strip() or "Binary parser bridge produced no output."
+            raise ValueError(error_message)
+
+        try:
+            payload = json.loads(stdout)
+        except json.JSONDecodeError as error:
+            detail = completed.stderr.strip()
+            if detail:
+                raise ValueError(detail) from error
+            raise ValueError(f"Binary parser returned invalid JSON: {error}") from error
+
+        return _from_binary_json(payload)
+    finally:
+        if normalized_path != file_path:
+            normalized_path.unlink(missing_ok=True)
+
+
 def from_reader_default_binary(file_reader) -> WeakDom:
     """
-    Parse a Roblox binary file (rbxl/rbxm).
-    This is a placeholder - full implementation would require the binary format spec.
+    Parse a Roblox binary file (rbxl/rbxm) from a binary file-like object.
     """
-    raise NotImplementedError(
-        "Binary Roblox file parsing is not yet implemented. "
-        "Please convert your file to XML format (.rbxlx or .rbxmx) using Roblox Studio."
-    )
+    temp_dir = Path(Path.home().anchor or "/") / "tmp"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_path = temp_dir / f"rbxlx-to-rojo-{uuid4().hex}.rbxl"
+    temp_path.write_bytes(file_reader.read())
+
+    try:
+        return from_path_default_binary(temp_path)
+    finally:
+        temp_path.unlink(missing_ok=True)

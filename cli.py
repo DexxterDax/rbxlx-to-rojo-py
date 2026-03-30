@@ -198,8 +198,7 @@ def routine() -> None:
                 tree = rbx_dom.from_reader_default(f)
         
         elif extension in ('.rbxm', '.rbxl'):
-            with open(file_path, 'rb') as f:
-                tree = rbx_dom.from_reader_default_binary(f)
+            tree = rbx_dom.from_path_default_binary(file_path)
         
         else:
             raise InvalidFile()
