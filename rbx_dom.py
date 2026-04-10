@@ -5,6 +5,7 @@ import logging
 import shutil
 import struct
 import subprocess
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -160,6 +161,16 @@ def _binary_bridge_script() -> Path:
     return Path(__file__).resolve().parent / "scripts" / "parse_binary_place.lua"
 
 
+def _bundled_rbxmk_path() -> Optional[Path]:
+    """Return a bundled rbxmk binary when present."""
+    executable = "rbxmk.exe" if sys.platform == "win32" else "rbxmk"
+    bundled = Path(__file__).resolve().parent / "bin" / executable
+    if bundled.exists():
+        return bundled
+
+    return None
+
+
 def _decompress_zstd(payload: bytes) -> bytes:
     """Decompress a Zstandard frame."""
     if zstd is not None:
@@ -294,9 +305,10 @@ def _from_binary_json(payload: Dict[str, Any]) -> WeakDom:
 def from_path_default_binary(file_path: Path) -> WeakDom:
     """
     Parse a Roblox binary file (rbxl/rbxm) from a path.
-    Requires `rbxmk` to be installed through Aftman.
+    Requires the Lua bridge and an `rbxmk` runtime.
     """
-    rbxmk = shutil.which("rbxmk")
+    bundled_rbxmk = _bundled_rbxmk_path()
+    rbxmk = str(bundled_rbxmk) if bundled_rbxmk is not None else shutil.which("rbxmk")
     if rbxmk is None:
         aftman_path = Path.home() / ".aftman" / "bin" / "rbxmk"
         if aftman_path.exists():
@@ -305,12 +317,16 @@ def from_path_default_binary(file_path: Path) -> WeakDom:
     if rbxmk is None:
         raise RuntimeError(
             "Binary Roblox file parsing requires `rbxmk`.\n"
-            "Install it with `aftman trust Anaminus/rbxmk && aftman add --global Anaminus/rbxmk`."
+            "Bundle it into the standalone app or install it with "
+            "`aftman trust Anaminus/rbxmk && aftman add --global Anaminus/rbxmk`."
         )
 
     script_path = _binary_bridge_script()
     if not script_path.exists():
-        raise RuntimeError(f"Missing binary parser bridge: {script_path}")
+        raise RuntimeError(
+            "Binary Roblox file parsing is not available in this build because "
+            f"the bridge script is missing: {script_path}"
+        )
 
     normalized_path = _normalize_binary_for_rbxmk(file_path)
 

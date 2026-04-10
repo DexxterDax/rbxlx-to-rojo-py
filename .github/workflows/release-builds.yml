@@ -1,0 +1,80 @@
+name: Release Builds
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            platform: macos-arm64
+            executable: dist/rbxlx-to-rojo/rbxlx-to-rojo
+          - os: windows-latest
+            platform: windows-x64
+            executable: dist/rbxlx-to-rojo/rbxlx-to-rojo.exe
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Set up Aftman
+        uses: ok-nick/setup-aftman@v0.4.2
+        with:
+          path: .
+
+      - name: Install rbxmk
+        run: aftman install --no-trust-check
+
+      - name: Build standalone bundle
+        run: python scripts/build_bootstrapper.py
+
+      - name: Smoke test bundle
+        run: ${{ matrix.executable }} --help
+
+      - name: Prepare release archive name
+        run: python scripts/prepare_release_artifact.py --platform ${{ matrix.platform }}
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rbxlx-to-rojo-${{ matrix.platform }}
+          path: release/rbxlx-to-rojo-${{ matrix.platform }}.zip
+          if-no-files-found: error
+
+  publish:
+    name: Publish Release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download built archives
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: rbxlx-to-rojo-*
+          merge-multiple: true
+
+      - name: Publish GitHub release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --title "$tag" --generate-notes
+          gh release upload "$tag" release-assets/* --clobber

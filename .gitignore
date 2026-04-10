@@ -1,4 +1,10 @@
 __pycache__
+.build-venv/
+.pyinstaller/
+build/
+dist/
+release/
+*.spec
 
 .DS_Store
 *.rbxl
