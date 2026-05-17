@@ -3,7 +3,7 @@
 import json
 import re
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 from structures import (
     InstructionReader, Instruction, AddToTreeInstruction,
     CreateFileInstruction, CreateFolderInstruction, TreePartition
@@ -105,6 +105,7 @@ class FileSystem(InstructionReader):
                 with open(file_path, 'wb') as f:
                     f.write(instruction.contents)
                 self.remove_stale_non_server_run_context_meta(file_path)
+                self.remove_redundant_legacy_run_context_meta(file_path)
             except Exception as e:
                 raise RuntimeError(f"Can't write to file {file_path}: {e}")
         
@@ -163,3 +164,32 @@ class FileSystem(InstructionReader):
             return
 
         meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+    def remove_redundant_legacy_run_context_meta(self, script_path: Path):
+        """Remove a script meta file when it only preserves default RunContext."""
+        meta_path = self.script_meta_path(script_path)
+        if meta_path is None or not meta_path.exists():
+            return
+
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+
+        if meta != {
+            "ignoreUnknownInstances": True,
+            "properties": {"RunContext": "Legacy"},
+        }:
+            return
+
+        meta_path.unlink()
+
+    def script_meta_path(self, script_path: Path) -> Optional[Path]:
+        """Return the sibling meta path for a Rojo script source path."""
+        script_name = script_path.name
+
+        for suffix in (".server.luau", ".client.luau", ".luau"):
+            if script_name.endswith(suffix):
+                return script_path.with_name(f"{script_name[:-len(suffix)]}.meta.json")
+
+        return None

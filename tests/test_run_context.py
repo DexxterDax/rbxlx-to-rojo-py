@@ -55,6 +55,17 @@ class TestRunContext(unittest.TestCase):
             },
         )
 
+    def test_legacy_script_file_does_not_get_run_context_meta_file(self):
+        script = Instance("Script", "ServerRunner", "script")
+        script.properties["Source"] = "print('server')"
+        script.properties["RunContext"] = "Legacy"
+
+        instructions, new_path = repr_instance(Path("Workspace"), script, {"script": True})
+
+        self.assertEqual(new_path, Path("Workspace"))
+        self.assertEqual(len(instructions), 1)
+        self.assertEqual(instructions[0].filename, Path("Workspace") / "ServerRunner.server.luau")
+
     def test_local_script_does_not_get_run_context_meta_file(self):
         script = Instance("LocalScript", "ClientRunner", "script")
         script.properties["Source"] = "print('client')"
@@ -89,6 +100,29 @@ class TestRunContext(unittest.TestCase):
                 "properties": {
                     "RunContext": "Server",
                 },
+            },
+        )
+
+    def test_legacy_script_still_gets_meta_file_when_children_require_it(self):
+        script = Instance("Script", "Container", "script")
+        script.properties["Source"] = "print('server')"
+        script.properties["RunContext"] = "Legacy"
+        script.children_refs.append("child")
+
+        instructions, new_path = repr_instance(
+            Path("Workspace"),
+            script,
+            {"script": True, "child": False},
+        )
+
+        self.assertEqual(new_path, Path("Workspace"))
+        self.assertEqual(len(instructions), 2)
+        self.assertEqual(instructions[0].filename, Path("Workspace") / "Container.server.luau")
+        self.assertEqual(instructions[1].filename, Path("Workspace") / "Container.meta.json")
+        self.assertEqual(
+            json.loads(instructions[1].contents.decode("utf-8")),
+            {
+                "ignoreUnknownInstances": True,
             },
         )
 

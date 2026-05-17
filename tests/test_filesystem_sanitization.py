@@ -83,6 +83,55 @@ class TestFileSystemSanitization(unittest.TestCase):
 
         self.assertFalse(stale_meta.exists())
 
+    def test_script_write_removes_redundant_legacy_run_context_meta(self):
+        stale_meta = self.temp_dir / "output" / "src" / "Workspace" / "ServerScript.meta.json"
+        stale_meta.parent.mkdir(parents=True, exist_ok=True)
+        stale_meta.write_text(
+            json.dumps(
+                {
+                    "ignoreUnknownInstances": True,
+                    "properties": {
+                        "RunContext": "Legacy",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        self.filesystem.read_instruction(
+            CreateFileInstruction(
+                filename=Path("Workspace") / "ServerScript.server.luau",
+                contents=b"print('server')",
+            )
+        )
+
+        self.assertFalse(stale_meta.exists())
+
+    def test_script_write_keeps_legacy_run_context_meta_when_it_has_other_content(self):
+        stale_meta = self.temp_dir / "output" / "src" / "Workspace" / "ServerScript.meta.json"
+        stale_meta.parent.mkdir(parents=True, exist_ok=True)
+        stale_meta.write_text(
+            json.dumps(
+                {
+                    "ignoreUnknownInstances": True,
+                    "className": "Script",
+                    "properties": {
+                        "RunContext": "Legacy",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        self.filesystem.read_instruction(
+            CreateFileInstruction(
+                filename=Path("Workspace") / "ServerScript.server.luau",
+                contents=b"print('server')",
+            )
+        )
+
+        self.assertTrue(stale_meta.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

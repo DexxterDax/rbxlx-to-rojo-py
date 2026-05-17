@@ -308,7 +308,7 @@ def create_script_meta(instance) -> Optional[MetaFile]:
         return None
 
     run_context = normalize_run_context(instance.get_property("RunContext"))
-    if run_context is None:
+    if run_context is None or run_context == "Legacy":
         return None
 
     return MetaFile(
